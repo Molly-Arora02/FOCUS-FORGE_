@@ -20,9 +20,22 @@ interface CoachChatInput {
 }
 
 export class AIService {
-  private static provider = process.env.AI_PROVIDER || "mock";
-  private static apiKey = process.env.AI_API_KEY || "";
-  private static model = process.env.AI_MODEL || "gemini-1.5-flash";
+  private static get provider(): string {
+    return process.env.AI_PROVIDER || "gemini";
+  }
+
+  private static get apiKey(): string {
+    return (
+      process.env.AI_API_KEY ||
+      process.env.GEMINI_API_KEY ||
+      process.env.OPENAI_API_KEY ||
+      ""
+    );
+  }
+
+  private static get model(): string {
+    return process.env.AI_MODEL || "gemini-1.5-flash";
+  }
 
   public static async generateDailyPlan(input: PlanGenerationInput) {
     const { user, goals, subjects, existingTasks, dateStr } = input;
@@ -32,10 +45,12 @@ export class AIService {
     // Check if live API key is configured
     if (this.apiKey && this.apiKey.length > 5 && !this.apiKey.includes("your-")) {
       try {
-        if (this.provider === "gemini") {
-          return await this.callGeminiPlan(input);
+        if (this.provider === "gemini" || this.apiKey.startsWith("AIza") || this.apiKey.startsWith("AQ.")) {
+          const plan = await this.callGeminiPlan(input);
+          if (plan && plan.tasks && plan.tasks.length > 0) return plan;
         } else if (this.provider === "openai") {
-          return await this.callOpenAIPlan(input);
+          const plan = await this.callOpenAIPlan(input);
+          if (plan && plan.tasks && plan.tasks.length > 0) return plan;
         }
       } catch (err) {
         console.warn("AI Provider call failed, falling back to intelligent rule engine:", err);
@@ -145,6 +160,25 @@ export class AIService {
 
   public static async decomposeGoal(goalTitle: string, user: UserProfile): Promise<Array<{ title: string; duration: number; priority: "high" | "medium" | "low" }>> {
     const sessionLength = user.preferences?.preferredSessionLength || 25;
+    
+    if (this.apiKey && this.apiKey.length > 5) {
+      try {
+        const prompt = `Decompose this goal into 4 atomic study/execution sprints: "${goalTitle}". Return valid JSON array matching [{ "title": string, "duration": number, "priority": "high"|"medium"|"low" }]. Session length is ${sessionLength} mins.`;
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent?key=${this.apiKey}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+        });
+        const data = await res.json();
+        const txt = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        const clean = txt?.replace(/```json/g, "")?.replace(/```/g, "")?.trim();
+        const parsed = JSON.parse(clean);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      } catch (e) {
+        console.warn("Decompose goal LLM error, using fallback:", e);
+      }
+    }
+
     return [
       { title: `Phase 1: Conceptual Map & Core Definitions for ${goalTitle}`, duration: sessionLength, priority: "high" },
       { title: `Phase 2: Deep Implementation & Hard Problem Drills`, duration: sessionLength * 2, priority: "high" },
@@ -158,13 +192,15 @@ export class AIService {
     const tone = user.preferences?.coachingStyle || "empathetic";
     const preferredDuration = user.preferences?.preferredSessionLength || 25;
 
-    // Check if live external LLM is configured
+    // Call live Gemini LLM
     if (this.apiKey && this.apiKey.length > 5 && !this.apiKey.includes("your-")) {
       try {
-        if (this.provider === "gemini") {
-          return await this.callGeminiCoach(input);
+        if (this.provider === "gemini" || this.apiKey.startsWith("AIza") || this.apiKey.startsWith("AQ.")) {
+          const coachRes = await this.callGeminiCoach(input);
+          if (coachRes && coachRes.message) return coachRes;
         } else if (this.provider === "openai") {
-          return await this.callOpenAICoach(input);
+          const coachRes = await this.callOpenAICoach(input);
+          if (coachRes && coachRes.message) return coachRes;
         }
       } catch (err) {
         console.warn("AI Coach API call error, falling back to intelligent conversational logic:", err);
@@ -257,6 +293,25 @@ export class AIService {
   ): Promise<Array<{ question: string; answer: string; concept: string }>> {
     const focusTheme = subTopic || topic || subjectName;
 
+    // Call live Gemini LLM if key is present
+    if (this.apiKey && this.apiKey.length > 5) {
+      try {
+        const prompt = `Generate 4 rigorous active recall flashcards for subject "${subjectName}", topic "${focusTheme}". Include deep technical explanation and practical invariant details. Return strict JSON array matching [{ "concept": string, "question": string, "answer": string }]. Do not include markdown code block syntax if possible.`;
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent?key=${this.apiKey}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+        });
+        const data = await res.json();
+        const txt = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        const clean = txt?.replace(/```json/g, "")?.replace(/```/g, "")?.trim();
+        const parsed = JSON.parse(clean);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      } catch (e) {
+        console.warn("Live Gemini flashcard generation error, falling back:", e);
+      }
+    }
+
     return [
       {
         concept: "Core Principle",
@@ -282,6 +337,24 @@ export class AIService {
   }
 
   public static async parseTimetableText(text: string): Promise<Array<{ title: string; day: string; time: string; subject: string }>> {
+    if (this.apiKey && this.apiKey.length > 5) {
+      try {
+        const prompt = `Extract all courses, classes, or recurring study blocks from this timetable text:\n\n${text}\n\nReturn strict JSON array matching [{ "title": string, "day": string, "time": string, "subject": string }].`;
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent?key=${this.apiKey}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+        });
+        const data = await res.json();
+        const txt = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        const clean = txt?.replace(/```json/g, "")?.replace(/```/g, "")?.trim();
+        const parsed = JSON.parse(clean);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      } catch (e) {
+        console.warn("Live timetable parse error, falling back:", e);
+      }
+    }
+
     const lines = text.split("\n").filter((l) => l.trim().length > 0);
     const parsed: Array<{ title: string; day: string; time: string; subject: string }> = [];
 
@@ -317,7 +390,21 @@ export class AIService {
   }
 
   private static async callGeminiCoach(input: CoachChatInput) {
-    const prompt = `You are Focus Forge AI Coach. Voice tone: ${input.user.preferences?.coachingStyle || "encouraging and precise"}. User message: "${input.userMessage}". Provide structured actionable advice with markdown, bullet points, and return valid JSON { "message": "...", "suggestedActions": [{ "label": "...", "action": "start_focus|open_planner|open_resources", "payload": {} }] }`;
+    const prompt = `You are Focus Forge AI Coach. Voice tone: ${input.user.preferences?.coachingStyle || "encouraging and precise"}.
+Active goals: ${input.goals.map((g) => g.title).join(", ")}.
+Recent study minutes today: ${input.recentSessions.reduce((a, s) => a + Math.round((s.actualDuration || 0)/60), 0)}.
+User says: "${input.userMessage}".
+
+Provide structured actionable advice with crisp markdown and practical focus steps.
+Return valid JSON formatted exactly like:
+{
+  "message": "...",
+  "suggestedActions": [
+    { "label": "Start 25m Focus Block", "action": "start_focus", "payload": { "duration": 25 } },
+    { "label": "Open Daily Planner", "action": "open_planner" }
+  ]
+}`;
+
     const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent?key=${this.apiKey}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -325,10 +412,11 @@ export class AIService {
     });
     const data = await response.json();
     const txt = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    const clean = txt?.replace(/```json/g, "")?.replace(/```/g, "")?.trim();
     try {
-      return JSON.parse(txt);
+      return JSON.parse(clean);
     } catch {
-      return { message: txt, suggestedActions: [{ label: "Start Focus Session", action: "start_focus" }] };
+      return { message: txt || clean, suggestedActions: [{ label: "Start Focus Session", action: "start_focus", payload: { duration: 25 } }] };
     }
   }
 
@@ -350,19 +438,30 @@ export class AIService {
     const data = await response.json();
     return {
       message: data.choices[0].message.content,
-      suggestedActions: [{ label: "Start Focus Session", action: "start_focus" }],
+      suggestedActions: [{ label: "Start Focus Session", action: "start_focus", payload: { duration: 25 } }],
     };
   }
 
   private static async callGeminiPlan(input: PlanGenerationInput) {
-    const prompt = `Generate a daily productivity plan for a user in timezone ${input.user.timezone}. Goals: ${JSON.stringify(input.goals)}. Return strict JSON matching DailyPlan schema.`;
+    const prompt = `Generate a daily productivity plan for a user in timezone ${input.user.timezone}. Goals: ${JSON.stringify(input.goals)}. Subjects: ${JSON.stringify(input.subjects)}. Return strict JSON matching:
+{
+  "date": "${input.dateStr}",
+  "timezone": "${input.user.timezone}",
+  "totalPlannedMinutes": number,
+  "explanation": "...",
+  "tasks": [
+    { "id": "t-1", "title": "...", "subjectName": "...", "priority": "high"|"medium"|"low", "startTime": "09:00", "endTime": "09:25", "durationMinutes": 25, "isBreak": false }
+  ]
+}`;
     const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent?key=${this.apiKey}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
     });
     const data = await response.json();
-    return data;
+    const txt = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    const clean = txt?.replace(/```json/g, "")?.replace(/```/g, "")?.trim();
+    return JSON.parse(clean);
   }
 
   private static async callOpenAIPlan(input: PlanGenerationInput) {
