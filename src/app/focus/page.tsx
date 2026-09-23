@@ -209,8 +209,10 @@ function FocusContent() {
     }, 1000);
   };
 
-  // Tab Switch Restriction Detection Hook
+  // Tab Switch Restriction Detection Hook (uses visibilitychange only to avoid false alarms from iframes/window blur)
   useEffect(() => {
+    let warningTimeout: NodeJS.Timeout | null = null;
+
     const handleVisibilityChange = () => {
       if (sessionState === "running" && document.visibilityState === "hidden") {
         setTabSwitchCount((prev) => {
@@ -223,30 +225,20 @@ function FocusContent() {
           playTabSwitchWarningAlert(0.6);
           speakCoachAlert(`Warning: Tab switch detected, ${user?.displayName || "Molly"}! Return to your focus workspace.`);
         }
-      }
-    };
-
-    const handleWindowBlur = () => {
-      if (sessionState === "running") {
-        setTabSwitchCount((prev) => {
-          const next = prev + 1;
-          triggerSystemTabSwitchAlert(user?.displayName || "Molly", next);
-          return next;
-        });
-        setShowTabWarning(true);
-        if (soundEnabled) {
-          playTabSwitchWarningAlert(0.6);
-          speakCoachAlert(`Warning: Tab switch detected, ${user?.displayName || "Molly"}! Return to your focus workspace.`);
-        }
+      } else if (document.visibilityState === "visible") {
+        // Automatically hide the warning banner after returning to focus page after 8 seconds
+        if (warningTimeout) clearTimeout(warningTimeout);
+        warningTimeout = setTimeout(() => {
+          setShowTabWarning(false);
+        }, 8000);
       }
     };
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
-    window.addEventListener("blur", handleWindowBlur);
 
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
-      window.removeEventListener("blur", handleWindowBlur);
+      if (warningTimeout) clearTimeout(warningTimeout);
     };
   }, [sessionState, soundEnabled, user?.displayName]);
 
