@@ -14,6 +14,7 @@ import {
   Volume2,
   Eye,
   EyeOff,
+  RefreshCw,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -52,14 +53,36 @@ export const ScreenAndCameraTracker: React.FC<ScreenAndCameraProps> = ({
   const [modelAccuracy] = useState(89.4); // Calibrated 89%+ detection accuracy
   const [audioFeedbackEnabled, setAudioFeedbackEnabled] = useState(true);
 
+  const [isCalibrating, setIsCalibrating] = useState(false);
+  const baselineLumRatio = useRef<number | null>(null);
+  const baselineXCentroid = useRef<number | null>(null);
+  const calibrationFrames = useRef<number>(0);
+  const calibrationSumLumRatio = useRef<number>(0);
+  const calibrationSumCentroid = useRef<number>(0);
+  const smoothedDeviation = useRef<number>(4);
+  const smoothedAttention = useRef<number>(96);
+
   const prevFrameData = useRef<Uint8ClampedArray | null>(null);
   const lastSpokenAlertTime = useRef<number>(0);
   const lookingAwayStartTime = useRef<number | null>(null);
+
+  const calibrateGaze = () => {
+    setIsCalibrating(true);
+    calibrationFrames.current = 0;
+    calibrationSumLumRatio.current = 0;
+    calibrationSumCentroid.current = 0;
+    baselineLumRatio.current = null;
+    baselineXCentroid.current = null;
+    lookingAwayStartTime.current = null;
+    setIsLookingAway(false);
+    setStatus("locked_in");
+  };
 
   // Camera stream handler
   useEffect(() => {
     let stream: MediaStream | null = null;
     if (isCameraActive) {
+      calibrateGaze();
       navigator.mediaDevices
         ?.getUserMedia({
           video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" },
@@ -124,7 +147,7 @@ export const ScreenAndCameraTracker: React.FC<ScreenAndCameraProps> = ({
     }
   };
 
-  // High Accuracy Attention & Gaze Vector Detection Loop (89.4% precision calibrated)
+  // High Accuracy Calibrated Attention & Gaze Vector Detection Loop
   useEffect(() => {
     let animId: number;
     let lastTime = Date.now();
@@ -150,7 +173,7 @@ export const ScreenAndCameraTracker: React.FC<ScreenAndCameraProps> = ({
           let motionDiff = 0;
           let leftLum = 0;
           let rightLum = 0;
-          let centerLum = 0;
+          let totalWeightedX = 0;
 
           const midX = w / 2;
 
@@ -163,14 +186,14 @@ export const ScreenAndCameraTracker: React.FC<ScreenAndCameraProps> = ({
 
             const pixelIdx = i / 4;
             const x = pixelIdx % w;
-            const y = Math.floor(pixelIdx / w);
+            const normX = x / w; // 0.0 to 1.0
 
-            if (x < midX - 15) {
+            totalWeightedX += normX * lum;
+
+            if (x < midX - 10) {
               leftLum += lum;
-            } else if (x > midX + 15) {
+            } else if (x > midX + 10) {
               rightLum += lum;
-            } else {
-              centerLum += lum;
             }
 
             if (prevFrameData.current) {
@@ -188,39 +211,65 @@ export const ScreenAndCameraTracker: React.FC<ScreenAndCameraProps> = ({
           const avgBrightness = totalBrightness / pixelCount;
           const avgMotion = motionDiff / pixelCount;
 
-          // Gaze Asymmetry calculation (head yaw / looking away)
-          const totalSideLum = leftLum + rightLum || 1;
-          const lumRatio = Math.abs(leftLum - rightLum) / totalSideLum;
-          const estimatedYawAngle = Math.round(lumRatio * 90); // 0 to 45+ degrees
-          setGazeDeviation(estimatedYawAngle);
+          const totalSideLum = (leftLum + rightLum) || 1;
+          const currentLumRatio = (leftLum - rightLum) / totalSideLum;
+          const currentCentroid = totalWeightedX / (totalBrightness || 1);
+
+          // Calibration phase: compute ambient baseline over first 25 frames
+          if (calibrationFrames.current < 25) {
+            calibrationSumLumRatio.current += currentLumRatio;
+            calibrationSumCentroid.current += currentCentroid;
+            calibrationFrames.current += 1;
+            if (calibrationFrames.current === 25) {
+              baselineLumRatio.current = calibrationSumLumRatio.current / 25;
+              baselineXCentroid.current = calibrationSumCentroid.current / 25;
+              setIsCalibrating(false);
+            }
+          }
+
+          const baseLum = baselineLumRatio.current ?? currentLumRatio;
+          const baseCentroid = baselineXCentroid.current ?? currentCentroid;
+
+          // Calculate deviation relative to ambient lighting baseline
+          const lumDelta = Math.abs(currentLumRatio - baseLum);
+          const centroidDelta = Math.abs(currentCentroid - baseCentroid);
+
+          // Scaled estimated head yaw angle in degrees
+          const rawYawAngle = Math.round(lumDelta * 65 + centroidDelta * 70);
+
+          // Exponential smoothing
+          smoothedDeviation.current = smoothedDeviation.current * 0.8 + rawYawAngle * 0.2;
+          const finalDeviation = Math.round(smoothedDeviation.current);
+          setGazeDeviation(finalDeviation);
 
           let newStatus: "locked_in" | "distracted" | "absent" = "locked_in";
-          let score = 95;
+          let targetScore = 96;
 
           const now = Date.now();
 
-          if (avgBrightness < 12) {
+          if (avgBrightness < 6 && avgMotion < 1) {
+            // Camera covered or completely dark
             newStatus = "absent";
-            score = 15;
+            targetScore = 20;
             setIsLookingAway(true);
-          } else if (estimatedYawAngle > 26 || avgMotion > 45) {
+          } else if (finalDeviation > 32 || avgMotion > 65) {
             // Looking away / turned head detected
             newStatus = "distracted";
-            score = Math.max(30, Math.round(75 - estimatedYawAngle * 0.8));
+            targetScore = Math.max(35, Math.round(80 - finalDeviation * 0.9));
             setIsLookingAway(true);
 
             if (!lookingAwayStartTime.current) {
               lookingAwayStartTime.current = now;
             } else {
               const durationLookingAway = (now - lookingAwayStartTime.current) / 1000;
-              // If looking away for more than 2 seconds, trigger sound and voice intervention!
-              if (durationLookingAway >= 2.0) {
-                if (audioFeedbackEnabled && now - lastSpokenAlertTime.current > 9000) {
+              // If looking away persistently for more than 4.5 seconds, trigger intervention
+              if (durationLookingAway >= 4.5) {
+                if (audioFeedbackEnabled && now - lastSpokenAlertTime.current > 18000) {
                   lastSpokenAlertTime.current = now;
                   playAttentionDepartureBeep(0.5);
                   const voicePrompts = [
                     `Eyes back on the screen, ${userName}! Stay locked in.`,
-                    `Attention drift detected. Recenter your focus on the task.`,
+                    `Attention drift detected. Recenter your focus on your sprint.`,
                     `Keep your gaze on your workspace, ${userName}. You're making progress.`,
                   ];
                   const chosenPrompt = voicePrompts[Math.floor(Math.random() * voicePrompts.length)];
@@ -231,14 +280,15 @@ export const ScreenAndCameraTracker: React.FC<ScreenAndCameraProps> = ({
           } else {
             // User is looking forward and locked in
             newStatus = "locked_in";
-            score = Math.min(100, Math.max(85, Math.round(98 - avgMotion * 0.15)));
+            targetScore = Math.min(100, Math.max(88, Math.round(98 - avgMotion * 0.1 - finalDeviation * 0.2)));
             setIsLookingAway(false);
             lookingAwayStartTime.current = null;
           }
 
-          setAttentionScore(score);
+          smoothedAttention.current = Math.round(smoothedAttention.current * 0.8 + targetScore * 0.2);
+          setAttentionScore(smoothedAttention.current);
           setStatus(newStatus);
-          onAttentionUpdate?.(score, newStatus);
+          onAttentionUpdate?.(smoothedAttention.current, newStatus);
         }
       }
 
@@ -351,23 +401,39 @@ export const ScreenAndCameraTracker: React.FC<ScreenAndCameraProps> = ({
 
       {/* Model Telemetry Banner */}
       {isCameraActive && (
-        <div className="flex items-center justify-between px-3 py-1.5 rounded-xl bg-black/60 border border-surface-border/80 text-[10px] font-mono">
+        <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 rounded-xl bg-black/60 border border-surface-border/80 text-[10px] font-mono">
           <div className="flex items-center gap-2">
             <span className="text-txt-muted">NEURAL GAZE ENGINE:</span>
-            <span className={isLookingAway ? "text-status-warning font-bold flex items-center gap-1" : "text-status-success font-bold flex items-center gap-1"}>
-              {isLookingAway ? <EyeOff className="w-3 h-3 text-status-warning animate-bounce" /> : <Eye className="w-3 h-3 text-status-success" />}
-              {isLookingAway ? `LOOKING AWAY (${gazeDeviation}° DEVIATION)` : `FOCUSED FORWARD (0° ALIGNED)`}
-            </span>
+            {isCalibrating ? (
+              <span className="text-forge font-bold flex items-center gap-1 animate-pulse">
+                <RefreshCw className="w-3 h-3 animate-spin" />
+                CALIBRATING LIGHT & POSITION...
+              </span>
+            ) : (
+              <span className={isLookingAway ? "text-status-warning font-bold flex items-center gap-1" : "text-status-success font-bold flex items-center gap-1"}>
+                {isLookingAway ? <EyeOff className="w-3 h-3 text-status-warning animate-bounce" /> : <Eye className="w-3 h-3 text-status-success" />}
+                {isLookingAway ? `LOOKING AWAY (${gazeDeviation}° DEVIATION)` : `FOCUSED FORWARD (0° ALIGNED)`}
+              </span>
+            )}
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={calibrateGaze}
+              title="Calibrate forward eye gaze & ambient lighting"
+              className="text-[9px] px-2 py-0.5 rounded bg-surface border border-surface-border text-txt-secondary hover:text-txt-primary transition-colors flex items-center gap-1 font-bold uppercase"
+            >
+              <RefreshCw className={`w-2.5 h-2.5 ${isCalibrating ? "animate-spin text-forge" : ""}`} />
+              Recalibrate
+            </button>
             <span className="text-txt-muted">CONFIDENCE: <strong className="text-txt-primary">{modelAccuracy}%</strong></span>
             <button
               type="button"
               onClick={triggerTestWarning}
               className="text-[9px] px-2 py-0.5 rounded bg-forge/20 text-forge border border-forge/40 hover:bg-forge/30 transition-colors font-bold uppercase"
             >
-              Test Voice Warning
+              Test Alert
             </button>
           </div>
         </div>
