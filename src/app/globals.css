@@ -87,6 +87,19 @@ body {
   -webkit-text-fill-color: transparent;
 }
 
+/* 3D Perspective & Flashcard Transforms */
+.perspective-1000 {
+  perspective: 1000px;
+}
+
+.transform-style-3d {
+  transform-style: preserve-3d;
+}
+
+.backface-hidden {
+  backface-visibility: hidden;
+}
+
 /* Subtle Shimmer & Pulse Animations */
 @keyframes forge-pulse-glow {
   0%, 100% {

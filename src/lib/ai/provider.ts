@@ -42,8 +42,7 @@ export class AIService {
       }
     }
 
-    // Fallback: Intelligent rule-based contextual scheduling engine
-    const activeGoals = goals.filter((g) => g.status === "active");
+    // Intelligent fallback rule engine
     const activeSubjects = subjects.length > 0 ? subjects : [
       { _id: "default-1", name: "Core Deep Work", color: "#43F59A", topics: ["Fundamentals"] } as Subject
     ];
@@ -52,10 +51,9 @@ export class AIService {
     let currentHour = 9;
     let currentMin = 0;
     let totalPlannedMinutes = 0;
-    const targetMaxMinutes = Math.min(maxDailyHours * 60, 300);
+    const targetMaxMinutes = Math.min(maxDailyHours * 60, 360);
 
-    // Prioritize high-priority active goals and pending tasks
-    const relevantTasks = existingTasks.filter((t) => t.status !== "completed").slice(0, 3);
+    const relevantTasks = existingTasks.filter((t) => t.status !== "completed").slice(0, 4);
 
     if (relevantTasks.length > 0) {
       for (const t of relevantTasks) {
@@ -84,7 +82,6 @@ export class AIService {
 
         totalPlannedMinutes += t.estimatedDuration;
 
-        // Auto schedule 10 min break
         if (user.preferences?.planningPreferences?.autoScheduleBreaks && totalPlannedMinutes < targetMaxMinutes) {
           const breakStart = endStr;
           currentMin += 10;
@@ -95,24 +92,23 @@ export class AIService {
           const breakEnd = `${currentHour.toString().padStart(2, "0")}:${currentMin.toString().padStart(2, "0")}`;
           tasks.push({
             id: `break-${Date.now()}-${tasks.length}`,
-            title: "Recharge & Hydrate Break",
+            title: "Hydration & Cognitive Recharge",
             priority: "low",
             startTime: breakStart,
             endTime: breakEnd,
             durationMinutes: 10,
             completed: false,
             isBreak: true,
-            breakActivity: "Step away from screens, drink water, stretch.",
+            breakActivity: "Step away from screen, hydrate, light neck/shoulder stretches.",
           });
         }
       }
     }
 
-    // Fill remaining slots with smart subject targets
     for (const sub of activeSubjects) {
       if (totalPlannedMinutes >= targetMaxMinutes) break;
       const slotDuration = preferredDuration;
-      const topic = sub.topics?.[0] || `${sub.name} Deep Study`;
+      const topic = sub.topics?.[0] || `${sub.name} Deep Review`;
 
       const startStr = `${currentHour.toString().padStart(2, "0")}:${currentMin.toString().padStart(2, "0")}`;
       currentMin += slotDuration;
@@ -135,28 +131,6 @@ export class AIService {
       });
 
       totalPlannedMinutes += slotDuration;
-
-      // Add break if enabled
-      if (user.preferences?.planningPreferences?.autoScheduleBreaks && totalPlannedMinutes < targetMaxMinutes) {
-        const breakStart = endStr;
-        currentMin += 10;
-        while (currentMin >= 60) {
-          currentHour += 1;
-          currentMin -= 60;
-        }
-        const breakEnd = `${currentHour.toString().padStart(2, "0")}:${currentMin.toString().padStart(2, "0")}`;
-        tasks.push({
-          id: `break-${Date.now()}-${tasks.length}`,
-          title: "Mindful Rest Period",
-          priority: "low",
-          startTime: breakStart,
-          endTime: breakEnd,
-          durationMinutes: 10,
-          completed: false,
-          isBreak: true,
-          breakActivity: "Brief walk, breathing exercise.",
-        });
-      }
     }
 
     return {
@@ -164,7 +138,7 @@ export class AIService {
       timezone: user.timezone,
       tasks,
       totalPlannedMinutes,
-      explanation: `Plan engineered for high cognitive throughput: structured in ${preferredDuration}-minute immersive intervals with intentional restorative breaks. Prioritized your active goals across ${activeSubjects.map((s) => s.name).join(", ")}.`,
+      explanation: `Engineered for high cognitive throughput: ${preferredDuration}-minute deep focus blocks intercalated with restorative intervals. Structured across ${activeSubjects.map((s) => s.name).join(", ")}.`,
       accepted: false,
     };
   }
@@ -172,63 +146,105 @@ export class AIService {
   public static async decomposeGoal(goalTitle: string, user: UserProfile): Promise<Array<{ title: string; duration: number; priority: "high" | "medium" | "low" }>> {
     const sessionLength = user.preferences?.preferredSessionLength || 25;
     return [
-      { title: `Phase 1: Conceptual Foundation & Outline for ${goalTitle}`, duration: sessionLength, priority: "high" },
-      { title: `Phase 2: Core Deep Work & Implementation`, duration: sessionLength * 2, priority: "high" },
-      { title: `Phase 3: Active Recall & Problem-Solving Drills`, duration: sessionLength, priority: "medium" },
-      { title: `Phase 4: Synthesis & Reflection Summary`, duration: sessionLength, priority: "low" },
+      { title: `Phase 1: Conceptual Map & Core Definitions for ${goalTitle}`, duration: sessionLength, priority: "high" },
+      { title: `Phase 2: Deep Implementation & Hard Problem Drills`, duration: sessionLength * 2, priority: "high" },
+      { title: `Phase 3: Active Recall Flashcard Testing`, duration: sessionLength, priority: "medium" },
+      { title: `Phase 4: Synthesis & Spaced Repetition Review`, duration: sessionLength, priority: "low" },
     ];
   }
 
   public static async askCoach(input: CoachChatInput): Promise<{ message: string; suggestedActions?: any[] }> {
     const { user, goals, subjects, recentSessions, pendingTasks, userMessage } = input;
     const tone = user.preferences?.coachingStyle || "empathetic";
+    const preferredDuration = user.preferences?.preferredSessionLength || 25;
 
-    // Format coaching response based on tone and live context
+    // Check if live external LLM is configured
+    if (this.apiKey && this.apiKey.length > 5 && !this.apiKey.includes("your-")) {
+      try {
+        if (this.provider === "gemini") {
+          return await this.callGeminiCoach(input);
+        } else if (this.provider === "openai") {
+          return await this.callOpenAICoach(input);
+        }
+      } catch (err) {
+        console.warn("AI Coach API call error, falling back to intelligent conversational logic:", err);
+      }
+    }
+
     const totalTodayMins = recentSessions
-      .filter((s) => s.startedAt.startsWith(new Date().toISOString().split("T")[0]))
-      .reduce((acc, s) => acc + Math.round(s.actualDuration / 60), 0);
+      .filter((s) => s.startedAt?.startsWith(new Date().toISOString().split("T")[0]))
+      .reduce((acc, s) => acc + Math.round((s.actualDuration || 0) / 60), 0);
 
-    const activeGoalsList = goals.map((g) => g.title).join(", ") || "daily habit consistency";
-    const pendingCount = pendingTasks.length;
+    const q = userMessage.toLowerCase();
 
-    const lowerQuery = userMessage.toLowerCase();
-
-    if (lowerQuery.includes("struggle") || lowerQuery.includes("tired") || lowerQuery.includes("distract") || lowerQuery.includes("procrastinat")) {
+    // 1. Struggling / Tired / Procrastination / Distracted
+    if (q.includes("struggle") || q.includes("tired") || q.includes("distract") || q.includes("procrastinat") || q.includes("lazy") || q.includes("unmotivated") || q.includes("overwhelm")) {
       return {
-        message: `I hear you. Resistance is completely normal when undertaking deep intellectual work. You've already completed **${totalTodayMins} minutes of verified focus today**.\n\nRather than forcing a massive block, let's lower the activation energy:\n1. Pick just one atomic 15-minute task.\n2. Put your phone in another room or turn on Do Not Disturb.\n3. Hit start and focus only on the first sentence or line of code.\n\nWould you like me to start a 15-minute low-friction session?`,
+        message: `I hear you loud and clear. Resistance is simply high friction between intent and action. You've already recorded **${totalTodayMins} minutes of focus** today, so your engine is capable.\n\nLet's use the **Activation Energy Protocol**:\n1. **Shrink the Scope**: Commit to just **10 to 15 minutes** of single-task immersion.\n2. **Isolate Environment**: Enable Fullscreen Zen Mode and Binaural Beats audio.\n3. **Frictionless Entry**: Start reading just one paragraph or typing one function.\n\nReady to do a 15-minute low-friction session with me right now?`,
         suggestedActions: [
-          { label: "Start 15m Quick Focus", action: "start_focus", payload: { duration: 15 } },
-          { label: "Take a 10m Guided Break", action: "take_break", payload: { duration: 10 } },
+          { label: "🚀 Start 15m Quick Focus", action: "start_focus", payload: { duration: 15, mode: "pomodoro" } },
+          { label: "🎧 Enable 40Hz Gamma Audio", action: "play_audio", payload: { type: "binaural-gamma" } },
+          { label: "🧘 5m Guided Breathing Break", action: "take_break", payload: { duration: 5 } },
         ],
       };
     }
 
-    if (lowerQuery.includes("plan") || lowerQuery.includes("schedule") || lowerQuery.includes("what should i do")) {
+    // 2. Planning / Schedule / Daily Routine
+    if (q.includes("plan") || q.includes("schedule") || q.includes("routine") || q.includes("what should i do") || q.includes("organize")) {
+      const topSubject = subjects[0]?.name || "Core Deep Work";
+      const topTask = pendingTasks[0]?.title || `Review ${topSubject} Mastery Concepts`;
       return {
-        message: `Based on your ${goals.length} active goals (${activeGoalsList}) and your preferred **${user.preferences?.preferredSessionLength || 25}m session rhythm**, here is what I recommend for right now:\n\n- **Next Priority**: Tackle ${pendingTasks[0]?.title || "your top subject review"}.\n- **Recommended Duration**: ${user.preferences?.preferredSessionLength || 25} minutes.\n- **Focus Strategy**: Silence notifications and keep a blank scratchpad next to you for stray thoughts.`,
+        message: `Based on your **${goals.length} active goals** and current study metrics, here is your high-impact execution path:\n\n- 🎯 **Primary Focus Block**: ${topTask}\n- ⏱️ **Recommended Interval**: ${preferredDuration} minutes (Peak Attention Window)\n- 🧠 **Strategy**: Disable notifications, open your notes, and apply active recall.\n\nWould you like me to auto-generate your optimized schedule for today or launch this session immediately?`,
         suggestedActions: [
-          { label: "Generate Full Day Plan", action: "open_planner" },
-          { label: "Start Recommended Session", action: "start_focus", payload: { duration: user.preferences?.preferredSessionLength || 25 } },
+          { label: "⚡ Start Recommended Session", action: "start_focus", payload: { duration: preferredDuration, title: topTask } },
+          { label: "📅 Open Daily AI Planner", action: "open_planner" },
+          { label: "🗂️ Generate Flashcards for " + topSubject, action: "generate_flashcards", payload: { subject: topSubject } },
         ],
       };
     }
 
-    if (lowerQuery.includes("exam") || lowerQuery.includes("test") || lowerQuery.includes("study")) {
+    // 3. Exam / Study / Flashcards / Review
+    if (q.includes("exam") || q.includes("test") || q.includes("study") || q.includes("flashcard") || q.includes("remember") || q.includes("memoriz")) {
       return {
-        message: `For exam preparation, passive re-reading is the least effective strategy. I recommend an **Active Recall & Interleaving protocol**:\n\n1. **25m Focus Block**: Solve practice problems or close your notes and write out key concepts from memory.\n2. **5m Review**: Verify gaps against the original materials.\n3. **10m Rest**: Let memory consolidation occur.\n\nShall we configure a dedicated exam focus session now?`,
+        message: `For long-term retention and exam mastery, passive reading provides an illusion of competence. We use **Active Recall & Spaced Repetition**:\n\n1. **25m Intense Problem Retrieval**: Test yourself without looking at answers.\n2. **5m Gap Diagnosis**: Check the exact reasoning behind errors.\n3. **10m Consolidation**: Flashcard drills with Leitner difficulty grading.\n\nLet's test your active retention right now in the study deck!`,
         suggestedActions: [
-          { label: "Start Exam Review Session", action: "start_focus", payload: { duration: 30 } },
-          { label: "Upload Timetable / Syllabus", action: "upload_resource" },
+          { label: "🗂️ Open Flashcard Study Deck", action: "open_resources" },
+          { label: "🎯 Start 30m Exam Review Timer", action: "start_focus", payload: { duration: 30, mode: "pomodoro" } },
         ],
       };
     }
 
-    // Default intelligent coaching reply
+    // 4. Voice / Audio / Binaural / Music
+    if (q.includes("audio") || q.includes("sound") || q.includes("music") || q.includes("binaural") || q.includes("noise") || q.includes("rain")) {
+      return {
+        message: `Our sound engine generates real-time procedural acoustics directly in your browser:\n\n- **40Hz Gamma Binaural Beats**: Stimulates neuro-attentional focus and rapid analytical processing.\n- **10Hz Alpha Waves**: Ideal for calm, reflective reading and concept synthesis.\n- **Rain & Brown Noise**: Masks ambient chatter and reduces cognitive auditory distractions.\n\nWhich soundscape shall we initialize?`,
+        suggestedActions: [
+          { label: "🎧 40Hz Gamma Focus Beats", action: "play_audio", payload: { type: "binaural-gamma" } },
+          { label: "🌧️ Ambient Rain Noise", action: "play_audio", payload: { type: "rain" } },
+          { label: "🌊 Deep Brown Noise", action: "play_audio", payload: { type: "brown-noise" } },
+        ],
+      };
+    }
+
+    // 5. Goal breakdown
+    if (q.includes("break down") || q.includes("decompose") || q.includes("complex") || q.includes("step by step")) {
+      return {
+        message: `To conquer high-complexity challenges, we segment them into four distinct cognitive sprints:\n\n1. **Sprint 1 (25m)**: Conceptual Decomposition & Architecture Outline\n2. **Sprint 2 (50m)**: Deep Implementation & Hard Problem Solving\n3. **Sprint 3 (25m)**: Edge Case Testing & Code Review\n4. **Sprint 4 (15m)**: Synthesis, Flashcards & Documentation\n\nShall I add these 4 milestones directly to your Focus Queue?`,
+        suggestedActions: [
+          { label: "➕ Add Sprints to Plan", action: "open_planner" },
+          { label: "⏱️ Launch Sprint 1 (25m)", action: "start_focus", payload: { duration: 25 } },
+        ],
+      };
+    }
+
+    // Default conversational response
     return {
-      message: `You're currently tracking **${goals.length} goals** across **${subjects.length} subjects** with **${pendingCount} pending items** on your agenda.\n\nMy role as your ${tone} AI Coach is to keep your momentum steady and prevent burnout. Focus on consistent, daily progress rather than sporadic bursts of overwork. What specific obstacle or goal can we tackle together right now?`,
+      message: `I'm standing by with active context on your workspace:\n- **Active Goals**: ${goals.length > 0 ? goals.map(g => g.title).join(", ") : "Building consistent deep focus daily"}\n- **Verified Focus Today**: ${totalTodayMins} minutes\n- **Pending Queue**: ${pendingTasks.length} tasks ready for execution\n\nI can speak responses aloud, launch instant focus sprints, generate custom flashcards, or map out your entire study roadmap. What would you like to achieve right now?`,
       suggestedActions: [
-        { label: "Break Down a Complex Goal", action: "decompose_goal" },
-        { label: "Review Today's Heatmap & Stats", action: "open_analytics" },
+        { label: "⚡ Start 25m Focus Block", action: "start_focus", payload: { duration: 25 } },
+        { label: "📅 Plan My Day", action: "open_planner" },
+        { label: "🗂️ Interactive Study Decks", action: "open_resources" },
+        { label: "📊 View Focus Heatmap", action: "open_analytics" },
       ],
     };
   }
@@ -243,30 +259,29 @@ export class AIService {
 
     return [
       {
-        concept: "Core Definition",
-        question: `What is the primary mechanism and fundamental principle behind ${focusTheme}?`,
-        answer: `${focusTheme} relies on decomposing state invariants and iteratively optimizing execution boundaries with minimal computational overhead.`,
+        concept: "Core Principle",
+        question: `What is the fundamental mechanism behind ${focusTheme}?`,
+        answer: `${focusTheme} isolates state mutations, enforces modular invariants, and optimizes data flow for deterministic performance.`,
       },
       {
-        concept: "Time & Space Complexity",
-        question: `What are the typical time and space complexity trade-offs encountered in ${focusTheme}?`,
-        answer: `Most standard implementations operate in O(V + E) or O(N log N) time, trading auxiliary memory for cache-locality and accelerated search throughput.`,
+        concept: "Algorithmic Complexity",
+        question: `What is the standard time and space complexity profile associated with ${focusTheme}?`,
+        answer: `Generally executes in O(N log N) or O(V + E) time with O(N) auxiliary space, balancing cache locality and throughput.`,
       },
       {
         concept: "Edge Case Invariants",
-        question: `What critical edge cases or failure modes must you guard against in ${focusTheme}?`,
-        answer: `Watch for cycle detection, disjoint partitions, null references, and negative edge weight conditions.`,
+        question: `What critical failure modes or boundary conditions must be verified in ${focusTheme}?`,
+        answer: `Verify zero-length inputs, cyclical graph references, concurrency race conditions, and memory leak vectors.`,
       },
       {
-        concept: "Practical Application",
-        question: `How would you explain the real-world engineering utility of ${focusTheme} in a technical interview?`,
-        answer: `It enables fault-tolerant distributed consensus, fast route calculations in navigation networks, and efficient query graph optimizations.`,
+        concept: "Real-World Application",
+        question: `How does ${focusTheme} translate into production software or engineering architectures?`,
+        answer: `Enables high-concurrency event processing, resilient state synchronization, and low-latency database queries.`,
       },
     ];
   }
 
   public static async parseTimetableText(text: string): Promise<Array<{ title: string; day: string; time: string; subject: string }>> {
-    // Intelligent heuristic schedule parser
     const lines = text.split("\n").filter((l) => l.trim().length > 0);
     const parsed: Array<{ title: string; day: string; time: string; subject: string }> = [];
 
@@ -280,30 +295,66 @@ export class AIService {
         }
       }
 
-      if (line.includes(":") || line.toLowerCase().includes("am") || line.toLowerCase().includes("pm") || line.length > 5) {
+      if (line.includes(":") || line.toLowerCase().includes("am") || line.toLowerCase().includes("pm") || line.length > 4) {
         parsed.push({
-          title: line.replace(/[0-9:apmAPM\-–]/g, "").trim() || "Course Block",
+          title: line.replace(/[0-9:apmAPM\-–]/g, "").trim() || "Deep Study Session",
           day: currentDay,
           time: "10:00 AM - 11:30 AM",
-          subject: line.split(/[\-\:]/)[0]?.trim() || "Academic Subject",
+          subject: line.split(/[\-\:]/)[0]?.trim() || "Computer Science",
         });
       }
     }
 
     if (parsed.length === 0) {
       return [
-        { title: "Algorithms & Complexity Lecture", day: "Monday", time: "10:00 AM - 11:30 AM", subject: "Computer Science" },
-        { title: "Distributed Systems Lab", day: "Wednesday", time: "02:00 PM - 04:00 PM", subject: "Systems Engineering" },
-        { title: "Database Systems Recitation", day: "Friday", time: "11:00 AM - 12:30 PM", subject: "Databases" },
+        { title: "Algorithms & Data Structures", day: "Monday", time: "10:00 AM - 11:30 AM", subject: "Computer Science" },
+        { title: "Distributed Systems Architecture", day: "Wednesday", time: "02:00 PM - 04:00 PM", subject: "Systems" },
+        { title: "Database Systems & Indexing", day: "Friday", time: "11:00 AM - 12:30 PM", subject: "Databases" },
       ];
     }
 
     return parsed.slice(0, 8);
   }
 
-  // Placeholder for direct LLM API calls when keys are provided
+  private static async callGeminiCoach(input: CoachChatInput) {
+    const prompt = `You are Focus Forge AI Coach. Voice tone: ${input.user.preferences?.coachingStyle || "encouraging and precise"}. User message: "${input.userMessage}". Provide structured actionable advice with markdown, bullet points, and return valid JSON { "message": "...", "suggestedActions": [{ "label": "...", "action": "start_focus|open_planner|open_resources", "payload": {} }] }`;
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent?key=${this.apiKey}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+    });
+    const data = await response.json();
+    const txt = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    try {
+      return JSON.parse(txt);
+    } catch {
+      return { message: txt, suggestedActions: [{ label: "Start Focus Session", action: "start_focus" }] };
+    }
+  }
+
+  private static async callOpenAICoach(input: CoachChatInput) {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: "You are Focus Forge AI Coach. Be crisp, highly practical, and motivating." },
+          { role: "user", content: input.userMessage }
+        ],
+      }),
+    });
+    const data = await response.json();
+    return {
+      message: data.choices[0].message.content,
+      suggestedActions: [{ label: "Start Focus Session", action: "start_focus" }],
+    };
+  }
+
   private static async callGeminiPlan(input: PlanGenerationInput) {
-    // Standard Gemini REST API implementation
     const prompt = `Generate a daily productivity plan for a user in timezone ${input.user.timezone}. Goals: ${JSON.stringify(input.goals)}. Return strict JSON matching DailyPlan schema.`;
     const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent?key=${this.apiKey}`, {
       method: "POST",
